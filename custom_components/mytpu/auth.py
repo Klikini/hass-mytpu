@@ -1,8 +1,8 @@
 """OAuth2 authentication for MyTPU API."""
 
 import logging
-import re
 import time
+from base64 import b64encode
 from dataclasses import dataclass
 
 import aiohttp
@@ -66,6 +66,8 @@ class ServerError(Exception):
 class MyTPUAuth:
     """Handles OAuth2 authentication with MyTPU."""
 
+    _oauth_basic_token: str = b64encode("webClientIdPassword:secret".encode("utf8")).decode("utf-8")
+
     def __init__(self, token_data: dict | None = None):
         """Initialize auth handler.
 
@@ -73,7 +75,6 @@ class MyTPUAuth:
             token_data: Previously stored token data (optional)
         """
         self._token: TokenInfo | None = None
-        self._oauth_basic_token: str | None = None
 
         # Load stored token if available
         if token_data:
@@ -97,8 +98,6 @@ class MyTPUAuth:
     ) -> None:
         """Authenticate with username/password to get tokens."""
         _LOGGER.debug("Starting full login for user: %s", username)
-        # First get the Basic auth token from the JS bundle
-        basic_token = await self._get_oauth_basic_token(session)
 
         url = f"{BASE_URL}/rest/oauth/token"
         data = {
@@ -107,8 +106,7 @@ class MyTPUAuth:
             "password": password,
         }
         headers = {
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Authorization": f"Basic {basic_token}",
+            "Authorization": f"Basic {self._oauth_basic_token}",
         }
 
         async with session.post(url, data=data, headers=headers) as resp:
@@ -172,54 +170,6 @@ class MyTPUAuth:
         assert self._token is not None
         return self._token.access_token
 
-    async def _get_oauth_basic_token(self, session: aiohttp.ClientSession) -> str:
-        """Extract the Basic auth token from TPU's JavaScript bundle.
-
-        The OAuth endpoint requires a Basic auth header containing client credentials
-        that are embedded in their minified JavaScript.
-        """
-        if self._oauth_basic_token:
-            return self._oauth_basic_token
-
-        # Step 1: Fetch the login page to find the main.js filename
-        async with session.get(f"{BASE_URL}/eportal/") as resp:
-            if resp.status != 200:
-                raise AuthError(f"Failed to fetch login page: {resp.status}")
-            html = await resp.text()
-
-        # Find the main.js filename (e.g., main.16e8dec7eb52aa3d12ed.js)
-        match = re.search(
-            r'<script[^>]*src="(main\.[a-f0-9]+\.js)"[^>]*></script>',
-            html,
-        )
-        if not match:
-            raise AuthError("Could not find main.js on login page")
-
-        main_js = match.group(1)
-
-        # Step 2: Fetch the JS bundle and extract the Basic auth token
-        async with session.get(f"{BASE_URL}/eportal/{main_js}") as resp:
-            if resp.status != 200:
-                raise AuthError(f"Failed to fetch {main_js}: {resp.status}")
-            js_content = await resp.text()
-
-        # Look for the Basic auth token in the JS
-        match = re.search(
-            r'["\']Authorization["\']:\s*["\']Basic ([A-Za-z0-9+/=]+)["\']',
-            js_content,
-        )
-        if not match:
-            # Try alternative pattern
-            match = re.search(
-                r'Authorization:"Basic ([A-Za-z0-9+/=]+)"',
-                js_content,
-            )
-        if not match:
-            raise AuthError(f"Could not find Basic auth token in {main_js}")
-
-        self._oauth_basic_token = match.group(1)
-        return self._oauth_basic_token
-
     async def _refresh_token(self, session: aiohttp.ClientSession) -> None:
         """Refresh the access token using the refresh token."""
         if not self._token or not self._token.refresh_token:
@@ -233,8 +183,6 @@ class MyTPUAuth:
             _LOGGER.debug(
                 "Refreshing token with %.0f seconds still remaining", remaining
             )
-        # Get the Basic auth token from the JS bundle
-        basic_token = await self._get_oauth_basic_token(session)
 
         url = f"{BASE_URL}/rest/oauth/token"
         data = {
@@ -242,8 +190,7 @@ class MyTPUAuth:
             "refresh_token": self._token.refresh_token,
         }
         headers = {
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Authorization": f"Basic {basic_token}",
+            "Authorization": f"Basic {self._oauth_basic_token}",
         }
 
         async with session.post(url, data=data, headers=headers) as resp:
